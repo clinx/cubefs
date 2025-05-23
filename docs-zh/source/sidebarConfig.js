@@ -48,6 +48,7 @@ module.exports = [
                     'user-guide/cli/nodeset.md',
                     'user-guide/cli/quota.md',
                     'user-guide/cli/blobstore-cli.md',
+                    'user-guide/cli/flashnode.md',
                 ]
             },
         ]
@@ -62,6 +63,7 @@ module.exports = [
             'design/objectnode.md',
             'design/client.md',
             'design/lcnode.md',
+            'design/flashnode.md',
             'design/authnode.md',
             'design/kernelclient.md',
         ]
@@ -102,6 +104,7 @@ module.exports = [
                     'ops/configs/objectnode.md',
                     'ops/configs/client.md',
                     'ops/configs/lcnode.md',
+                    'ops/configs/flashnode.md',
                     'ops/configs/blobstore/base.md',
                     'ops/configs/blobstore/rpc.md',
                     'ops/configs/blobstore/cm.md',
