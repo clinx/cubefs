@@ -49,6 +49,7 @@ const (
 	SummaryKey                  = "DirStat"
 	UpdateAccessFileRetry       = 3
 	AccessStatKey               = "AccessStat"
+	NewHddStatKey               = "NewHddStat"
 	AccessFileCountSsdKey       = "AccessFileCountSsd"
 	AccessFileSizeSsdKey        = "AccessFileSizeSsd"
 	AccessFileCountHddKey       = "AccessFileCountHdd"
@@ -2103,7 +2104,7 @@ func (mw *MetaWrapper) XAttrsList_ll(inode uint64) ([]string, error) {
 }
 
 func (mw *MetaWrapper) SetSummaryAndAccessFileInfo_ll(parentIno uint64, info *SummaryInfo, valueCountSsd string, valueSizeSsd string,
-	valueCountHdd string, valueSizeHdd string, valueCountBlobStore string, valueSizeBlobStore string,
+	valueCountHdd string, valueSizeHdd string, valueCountBlobStore string, valueSizeBlobStore string, filesNewHdd int64, fbytesNewHdd int64,
 ) {
 	mp := mw.getPartitionByInode(parentIno)
 	if mp == nil {
@@ -2122,14 +2123,17 @@ func (mw *MetaWrapper) SetSummaryAndAccessFileInfo_ll(parentIno uint64, info *Su
 		strconv.FormatInt(info.FilesBlobStore, 10) + "," +
 		strconv.FormatInt(info.FbytesBlobStore, 10)
 
-	log.LogDebugf("SetSummaryAndAccessFileInfo_ll: parentIno(%v) valueSummary(%v)  valueCountSsd(%v) valueSizeSsd(%v) valueCountHdd(%v) valueSizeHdd(%v) valueCountBlobStore(%v) valueSizeBlobStore(%v)",
-		parentIno, valueSummary, valueCountSsd, valueSizeSsd, valueCountHdd, valueSizeHdd, valueCountBlobStore, valueSizeBlobStore)
+	log.LogDebugf("SetSummaryAndAccessFileInfo_ll: parentIno(%v) valueSummary(%v)  valueCountSsd(%v) valueSizeSsd(%v) valueCountHdd(%v) valueSizeHdd(%v) valueCountBlobStore(%v) valueSizeBlobStore(%v) filesNewHdd(%v) fbytesNewHdd(%v)",
+		parentIno, valueSummary, valueCountSsd, valueSizeSsd, valueCountHdd, valueSizeHdd, valueCountBlobStore, valueSizeBlobStore, filesNewHdd, fbytesNewHdd)
 
 	accessStat := valueCountSsd + "|" + valueSizeSsd + "|" + valueCountHdd + "|" + valueSizeHdd + "|" + valueCountBlobStore + "|" + valueSizeBlobStore
 
 	attrs := make(map[string]string)
 	attrs[SummaryKey] = valueSummary
 	attrs[AccessStatKey] = accessStat
+	if fbytesNewHdd != 0 {
+		attrs[NewHddStatKey] = strconv.FormatInt(filesNewHdd, 10) + "," + strconv.FormatInt(fbytesNewHdd, 10)
+	}
 
 	for cnt := 0; cnt < UpdateAccessFileRetry; cnt++ {
 		err := mw.BatchSetXAttr_ll(parentIno, attrs)
@@ -2201,6 +2205,8 @@ type SummaryInfo struct {
 	FbytesHdd       int64
 	FilesBlobStore  int64
 	FbytesBlobStore int64
+	FilesNewHdd     int64
+	FbytesNewHdd    int64
 }
 
 type AccessTimeConfig struct {
@@ -2558,6 +2564,7 @@ func getSummaryInfoFromXattrs(cluster string, volName string, isColdVolume bool,
 	for _, xattrInfo := range xattrInfos {
 		if xattrInfo.XAttrs[SummaryKey] != "" {
 			var totalFiles, subdirs, totalFbytes, filesSsd, fbytesSsd, filesHdd, fbytesHdd, filesBlobStore, fbytesBlobStore int64
+			var filesNewHdd, fbytesNewHdd int64
 			summaryList := strings.Split(xattrInfo.XAttrs[SummaryKey], ",")
 			if len(summaryList) == 3 {
 				// old summary
@@ -2570,7 +2577,6 @@ func getSummaryInfoFromXattrs(cluster string, volName string, isColdVolume bool,
 					fbytesSsd = totalFbytes
 				}
 			} else if len(summaryList) == 9 {
-				// new summary
 				totalFiles, _ = strconv.ParseInt(summaryList[0], 10, 64)
 				subdirs, _ = strconv.ParseInt(summaryList[1], 10, 64)
 				totalFbytes, _ = strconv.ParseInt(summaryList[2], 10, 64)
@@ -2580,6 +2586,14 @@ func getSummaryInfoFromXattrs(cluster string, volName string, isColdVolume bool,
 				fbytesHdd, _ = strconv.ParseInt(summaryList[6], 10, 64)
 				filesBlobStore, _ = strconv.ParseInt(summaryList[7], 10, 64)
 				fbytesBlobStore, _ = strconv.ParseInt(summaryList[8], 10, 64)
+
+				if fbytesHdd != 0 && xattrInfo.XAttrs[NewHddStatKey] != "" {
+					newHddList := strings.Split(xattrInfo.XAttrs[NewHddStatKey], ",")
+					if len(newHddList) == 2 {
+						filesNewHdd, _ = strconv.ParseInt(newHddList[0], 10, 64)
+						fbytesNewHdd, _ = strconv.ParseInt(newHddList[1], 10, 64)
+					}
+				}
 			} else {
 				log.LogWarnf("getSummaryInfoFromXattrs: cluster(%v) volName(%v) ino(%v) summaryList(%v) len(%v) is not correct",
 					cluster, volName, xattrInfo.Inode, summaryList, len(summaryList))
@@ -2596,6 +2610,9 @@ func getSummaryInfoFromXattrs(cluster string, volName string, isColdVolume bool,
 				summaryInfo.FbytesHdd += fbytesHdd
 				summaryInfo.FilesBlobStore += filesBlobStore
 				summaryInfo.FbytesBlobStore += fbytesBlobStore
+				summaryInfo.FilesNewHdd += filesNewHdd
+				summaryInfo.FbytesNewHdd += fbytesNewHdd
+
 			}
 		}
 	}
@@ -2603,10 +2620,12 @@ func getSummaryInfoFromXattrs(cluster string, volName string, isColdVolume bool,
 
 func (mw *MetaWrapper) getDirSummary(summaryInfo *SummaryInfo, inodeCh <-chan uint64, errch chan<- error, isColdVolume bool) {
 	var inodes []uint64
-	var keys []string
+	keys := []string{SummaryKey}
+	if mw.includeNewHddStatKeyInDirSummary {
+		keys = append(keys, NewHddStatKey)
+	}
 	for inode := range inodeCh {
 		inodes = append(inodes, inode)
-		keys = append(keys, SummaryKey)
 		if len(inodes) < BatchSize {
 			continue
 		}
@@ -2616,7 +2635,6 @@ func (mw *MetaWrapper) getDirSummary(summaryInfo *SummaryInfo, inodeCh <-chan ui
 			return
 		}
 		inodes = inodes[0:0]
-		keys = keys[0:0]
 		getSummaryInfoFromXattrs(mw.cluster, mw.volname, isColdVolume, xattrInfos, summaryInfo)
 	}
 	xattrInfos, err := mw.BatchGetXAttr(inodes, keys)
@@ -2681,13 +2699,14 @@ func (mw *MetaWrapper) getSummaryOrigin(parentIno uint64, summaryCh chan<- Summa
 	}
 }
 
-func (mw *MetaWrapper) RefreshSummary_ll(parentIno uint64, goroutineNum int32, unit string, split string, frequency int, readDirLimit int, batchInodeSize int) error {
+func (mw *MetaWrapper) RefreshSummary_ll(parentIno uint64, goroutineNum int32, unit string, split string, frequency int, readDirLimit int, batchInodeSize int, getInodesByPid func(vol string, pid uint64) (bool, map[uint64]struct{})) error {
 	if goroutineNum > MaxSummaryGoroutineNum {
 		goroutineNum = MaxSummaryGoroutineNum
 	}
 	if goroutineNum <= 0 {
 		goroutineNum = 1
 	}
+
 	var wg sync.WaitGroup
 	var currentGoroutineNum int32 = 0
 	errch := make(chan error)
@@ -2703,7 +2722,7 @@ func (mw *MetaWrapper) RefreshSummary_ll(parentIno uint64, goroutineNum int32, u
 		defer limiter.Stop()
 	}
 
-	go mw.refreshSummary(parentIno, errch, &wg, &currentGoroutineNum, true, goroutineNum, accessFileInfo, limiter, readDirLimit, batchInodeSize)
+	go mw.refreshSummary(parentIno, errch, &wg, &currentGoroutineNum, true, goroutineNum, accessFileInfo, limiter, readDirLimit, batchInodeSize, getInodesByPid)
 	go func() {
 		wg.Wait()
 		close(errch)
@@ -2716,7 +2735,8 @@ func (mw *MetaWrapper) RefreshSummary_ll(parentIno uint64, goroutineNum int32, u
 
 func updateLocalSummary(inodeInfos []*proto.InodeInfo, splits []string, timeUnit string, newSummaryInfo *SummaryInfo,
 	accessFileCountSsd []int32, accessFileSizeSsd []uint64, accessFileCountHdd []int32, accessFileSizeHdd []uint64,
-	accessFileCountBlobStore []int32, accessFileSizeBlobStore []uint64,
+	accessFileCountBlobStore []int32, accessFileSizeBlobStore []uint64, hasPidInodes bool, pidInodes map[uint64]struct{},
+	newHddCount *int64, newHddSize *int64,
 ) {
 	currentTime := time.Now()
 	for _, inodeInfo := range inodeInfos {
@@ -2725,6 +2745,12 @@ func updateLocalSummary(inodeInfos []*proto.InodeInfo, splits []string, timeUnit
 		if inodeInfo.StorageClass == proto.StorageClass_Replica_HDD {
 			newSummaryInfo.FilesHdd += 1
 			newSummaryInfo.FbytesHdd += int64(inodeInfo.Size)
+			if hasPidInodes {
+				if _, ok := pidInodes[inodeInfo.Inode]; !ok {
+					*newHddCount += 1
+					*newHddSize += int64(inodeInfo.Size)
+				}
+			}
 		}
 		if inodeInfo.StorageClass == proto.StorageClass_Replica_SSD {
 			newSummaryInfo.FilesSsd += 1
@@ -2772,7 +2798,7 @@ func updateLocalSummary(inodeInfos []*proto.InodeInfo, splits []string, timeUnit
 }
 
 func (mw *MetaWrapper) refreshSummary(parentIno uint64, errCh chan<- error, wg *sync.WaitGroup, currentGoroutineNum *int32, newGoroutine bool,
-	goroutineNum int32, accessTimeCfg AccessTimeConfig, limiter *time.Ticker, readDirLimit int, batchInodeSize int,
+	goroutineNum int32, accessTimeCfg AccessTimeConfig, limiter *time.Ticker, readDirLimit int, batchInodeSize int, getInodesByPid func(vol string, pid uint64) (bool, map[uint64]struct{}),
 ) {
 	defer func() {
 		if newGoroutine {
@@ -2800,6 +2826,12 @@ func (mw *MetaWrapper) refreshSummary(parentIno uint64, errCh chan<- error, wg *
 	accessFileSizeHdd := make([]uint64, len(splits))
 	accessFileCountBlobStore := make([]int32, len(splits))
 	accessFileSizeBlobStore := make([]uint64, len(splits))
+	var filesNewHdd int64
+	var fbytesNewHdd int64
+
+	hasPidInodes := false
+	pidInodesInited := false
+	var pidInodes map[uint64]struct{}
 
 	noMore := false
 	from := ""
@@ -2838,15 +2870,35 @@ func (mw *MetaWrapper) refreshSummary(parentIno uint64, errCh chan<- error, wg *
 				continue
 			}
 			inodeInfos := mw.BatchInodeGet(inodeList)
+			if !pidInodesInited && getInodesByPid != nil {
+				for _, inodeInfo := range inodeInfos {
+					if inodeInfo != nil && inodeInfo.StorageClass == proto.StorageClass_Replica_HDD {
+						hasPidInodes, pidInodes = getInodesByPid(mw.volname, parentIno)
+						pidInodesInited = true
+						break
+					}
+				}
+			}
 			updateLocalSummary(inodeInfos, splits, accessTimeCfg.Unit, &newSummaryInfo, accessFileCountSsd, accessFileSizeSsd,
-				accessFileCountHdd, accessFileSizeHdd, accessFileCountBlobStore, accessFileSizeBlobStore)
+				accessFileCountHdd, accessFileSizeHdd, accessFileCountBlobStore, accessFileSizeBlobStore, hasPidInodes, pidInodes,
+				&filesNewHdd, &fbytesNewHdd)
 			inodeList = inodeList[0:0]
 		}
 	}
 	if len(inodeList) > 0 {
 		inodeInfos := mw.BatchInodeGet(inodeList)
+		if !pidInodesInited && getInodesByPid != nil {
+			for _, inodeInfo := range inodeInfos {
+				if inodeInfo != nil && inodeInfo.StorageClass == proto.StorageClass_Replica_HDD {
+					hasPidInodes, pidInodes = getInodesByPid(mw.volname, parentIno)
+					pidInodesInited = true
+					break
+				}
+			}
+		}
 		updateLocalSummary(inodeInfos, splits, accessTimeCfg.Unit, &newSummaryInfo, accessFileCountSsd, accessFileSizeSsd,
-			accessFileCountHdd, accessFileSizeHdd, accessFileCountBlobStore, accessFileSizeBlobStore)
+			accessFileCountHdd, accessFileSizeHdd, accessFileCountBlobStore, accessFileSizeBlobStore, hasPidInodes, pidInodes,
+			&filesNewHdd, &fbytesNewHdd)
 		inodeList = inodeList[0:0]
 	}
 
@@ -2898,16 +2950,17 @@ func (mw *MetaWrapper) refreshSummary(parentIno uint64, errCh chan<- error, wg *
 	}
 	resultSizeBlobStore = append(resultSizeBlobStore, strconv.FormatInt(newSummaryInfo.FbytesBlobStore, 10))
 	valueSizeBlobStore := strings.Join(resultSizeBlobStore, ",")
+	log.LogDebugf("refreshSummary: parentIno(%v) FilesNewHdd(%v) FbytesNewHdd(%v)", parentIno, filesNewHdd, fbytesNewHdd)
 
-	go mw.SetSummaryAndAccessFileInfo_ll(parentIno, &newSummaryInfo, valueCountSsd, valueSizeSsd, valueCountHdd, valueSizeHdd, valueCountBlobStored, valueSizeBlobStore)
+	go mw.SetSummaryAndAccessFileInfo_ll(parentIno, &newSummaryInfo, valueCountSsd, valueSizeSsd, valueCountHdd, valueSizeHdd, valueCountBlobStored, valueSizeBlobStore, filesNewHdd, fbytesNewHdd)
 
 	for _, subdirIno := range subdirsList {
 		if atomic.LoadInt32(currentGoroutineNum) < goroutineNum {
 			wg.Add(1)
 			atomic.AddInt32(currentGoroutineNum, 1)
-			go mw.refreshSummary(subdirIno, errCh, wg, currentGoroutineNum, true, goroutineNum, accessTimeCfg, limiter, readDirLimit, batchInodeSize)
+			go mw.refreshSummary(subdirIno, errCh, wg, currentGoroutineNum, true, goroutineNum, accessTimeCfg, limiter, readDirLimit, batchInodeSize, getInodesByPid)
 		} else {
-			mw.refreshSummary(subdirIno, errCh, wg, currentGoroutineNum, false, goroutineNum, accessTimeCfg, limiter, readDirLimit, batchInodeSize)
+			mw.refreshSummary(subdirIno, errCh, wg, currentGoroutineNum, false, goroutineNum, accessTimeCfg, limiter, readDirLimit, batchInodeSize, getInodesByPid)
 		}
 	}
 }

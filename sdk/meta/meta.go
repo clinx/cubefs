@@ -103,6 +103,7 @@ type MetaConfig struct {
 	VerReadSeq           uint64
 	InnerReq             bool
 	DisableTrashByClient bool
+	IncludeNewHddStatKeyInDirSummary bool
 }
 
 type MetaWrapper struct {
@@ -182,6 +183,7 @@ type MetaWrapper struct {
 	subDir        string
 
 	disableTrashByClient bool
+	includeNewHddStatKeyInDirSummary bool
 
 	VerReadSeq          uint64
 	LastVerSeq          uint64
@@ -255,6 +257,7 @@ func NewMetaWrapper(config *MetaConfig) (*MetaWrapper, error) {
 	mw.DefaultStorageClass = proto.StorageClass_Unspecified
 	mw.InnerReq = config.InnerReq
 	mw.disableTrashByClient = config.DisableTrashByClient
+	mw.includeNewHddStatKeyInDirSummary = config.IncludeNewHddStatKeyInDirSummary
 
 	for limit > 0 {
 		err = mw.initMetaWrapper()
